@@ -26,11 +26,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Narrowed to one configuration while the workflow is being proven on a
+        # hosted runner. The other three are known to build locally; add them
+        # back once this one is green:
+        #   - { arch: x64, config: Release }
+        #   - { arch: x64, config: Debug }
+        #   - { arch: x86, config: Debug }
         include:
-          - { arch: x64, config: Release }
           - { arch: x86, config: Release }
-          - { arch: x64, config: Debug }
-          - { arch: x86, config: Debug }
 
     steps:
       - uses: actions/checkout@v4
@@ -62,20 +65,6 @@ jobs:
             throw "x64-hosted clang-cl not found under $vs. The runner image lacks the C++ Clang tools component."
           }
           & $clang --version | Select-Object -First 1
-
-      # Source + objdir + output is ~9 GB for a Debug configuration and the
-      # runner has limited free space, so reclaim what we can up front.
-      - name: Free disk space
-        shell: pwsh
-        run: |
-          Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
-          foreach ($p in @("$env:ProgramFiles\dotnet\sdk\NuGetFallbackFolder",
-                           "${env:ProgramFiles(x86)}\Android",
-                           "$env:AGENT_TOOLSDIRECTORY\Ruby",
-                           "$env:AGENT_TOOLSDIRECTORY\go")) {
-            if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
-          }
-          Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
 
       # The source path must be 62 characters or fewer (see README), so the
       # build root has to be short - not under the workspace.
