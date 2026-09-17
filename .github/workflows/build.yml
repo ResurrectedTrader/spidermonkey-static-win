@@ -1,0 +1,141 @@
+name: Build SpiderMonkey
+
+# Deliberately manual. A full matrix is roughly an hour per configuration even on
+# fast hardware, and the output only changes when the ESR line moves - a few
+# times a year. Consumers download the published assets; they do not build.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Firefox ESR version (e.g. 153.3.0esr)
+        required: true
+        default: 153.3.0esr
+      publish:
+        description: Publish the artifacts as a release
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # GitHub's hard ceiling is 360. Hosted runners are 4 vCPU, so a cold
+    # SpiderMonkey build is much slower here than on a workstation; this leaves
+    # room without letting a hung build burn the full allowance.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, config: Release }
+          - { arch: x86, config: Release }
+          - { arch: x64, config: Debug }
+          - { arch: x86, config: Debug }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # SpiderMonkey cannot be built with MSVC proper - clang-cl is mandatory.
+      # The runner image ships Visual Studio, but whether the Clang component is
+      # included has varied, so fail loudly here rather than 40 minutes in.
+      - name: Check for clang-cl
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+                  -latest -property installationPath
+          $clang = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang-cl.exe'
+          if (-not (Test-Path $clang)) {
+            throw "x64-hosted clang-cl not found under $vs. The runner image lacks the C++ Clang tools component."
+          }
+          & $clang --version | Select-Object -First 1
+
+      # Source + objdir + output is ~9 GB for a Debug configuration and the
+      # runner has limited free space, so reclaim what we can up front.
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+          foreach ($p in @("$env:ProgramFiles\dotnet\sdk\NuGetFallbackFolder",
+                           "${env:ProgramFiles(x86)}\Android",
+                           "$env:AGENT_TOOLSDIRECTORY\Ruby",
+                           "$env:AGENT_TOOLSDIRECTORY\go")) {
+            if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      # The source path must be 62 characters or fewer (see README), so the
+      # build root has to be short - not under the workspace.
+      - name: Build and package
+        shell: pwsh
+        run: |
+          .\build-spidermonkey.ps1 `
+            -Root C:\sm `
+            -Arch ${{ matrix.arch }} `
+            -Config ${{ matrix.config }} `
+            -Version ${{ inputs.version }} `
+            -Verify
+
+      # Package before deleting anything: the objdir is only needed until the
+      # single .lib exists.
+      - name: Zip the distribution
+        shell: pwsh
+        run: |
+          $tag = "${{ matrix.arch }}-$("${{ matrix.config }}".ToLower())"
+          $dist = "C:\sm\dist-$tag"
+          if (-not (Test-Path "$dist\spidermonkey.lib")) { throw "no library at $dist" }
+          Compress-Archive -Path "$dist\*" -DestinationPath "$env:GITHUB_WORKSPACE\spidermonkey-$tag.zip" -CompressionLevel Optimal
+          "{0,-28} {1:N0} MB" -f "spidermonkey-$tag.zip", ((Get-Item "$env:GITHUB_WORKSPACE\spidermonkey-$tag.zip").Length/1MB)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spidermonkey-${{ matrix.arch }}-${{ matrix.config }}
+          path: spidermonkey-*.zip
+          retention-days: 7
+          compression-level: 0   # already a zip
+
+      # A failed build is worth diagnosing without re-running an hour of work.
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.arch }}-${{ matrix.config }}
+          path: |
+            C:\sm\cfg-*.log
+            C:\sm\build-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: spidermonkey-*
+          merge-multiple: true
+      # Each zip is well under the 2 GiB per-asset limit; a combined archive
+      # would not be, so they are published separately.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la *.zip
+          gh release create "spidermonkey-${{ inputs.version }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "SpiderMonkey ${{ inputs.version }}" \
+            --notes "Static SpiderMonkey libraries built against the static CRT.
+
+          | Configuration | CRT | Consumer defines |
+          |---|---|---|
+          | x64/x86 Release | \`/MT\` (\`libcmt\`) | \`STATIC_JS_API\` \`XP_WIN\` |
+          | x64/x86 Debug | \`/MTd\` (\`libcmtd\`) | \`STATIC_JS_API\` \`XP_WIN\` \`DEBUG\` |
+
+          Link \`mincore.lib\` alongside the usual Win32 set. Each archive contains
+          \`spidermonkey.lib\`, \`include/\` and a \`README.txt\`.
+
+          Every configuration was verified by linking a DLL and executing JavaScript
+          through it, and by confirming zero dynamic-CRT imports." \
+            *.zip

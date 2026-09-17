@@ -1,0 +1,7 @@
+# Build output. The script keeps everything under -Root, which should be
+# outside the repo anyway (the source path must be <= 62 characters).
+/sm/
+/dist-*/
+/obj-*/
+*.log
+*.rsp
