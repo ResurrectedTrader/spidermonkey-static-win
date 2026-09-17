@@ -26,14 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Narrowed to one configuration while the workflow is being proven on a
-        # hosted runner. The other three are known to build locally; add them
-        # back once this one is green:
-        #   - { arch: x64, config: Release }
-        #   - { arch: x64, config: Debug }
-        #   - { arch: x86, config: Debug }
         include:
+          - { arch: x64, config: Release }
+          - { arch: x64, config: Debug }
           - { arch: x86, config: Release }
+          - { arch: x86, config: Debug }
 
     steps:
       - uses: actions/checkout@v4
