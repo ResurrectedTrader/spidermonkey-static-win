@@ -116,14 +116,29 @@ function Get-SevenZip {
 }
 
 function Get-LlvmBin {
-    # Prefer the newest Visual Studio's bundled clang-cl; it must be x64-hosted.
-    $vs = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
-          Sort-Object Name -Descending
-    foreach ($v in $vs) {
-        $p = Join-Path $v.FullName "Community\VC\Tools\Llvm\x64\bin"
-        if (Test-Path (Join-Path $p 'clang-cl.exe')) { return $p }
+    # The x64-hosted clang-cl bundled with Visual Studio. Located via vswhere
+    # rather than a guessed path: the edition directory differs between
+    # installs (Community locally, Enterprise on GitHub-hosted runners), so
+    # hardcoding one silently fails on the other.
+    $candidates = @()
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        Invoke-Native { $script:vsPaths = @(& $vswhere -products * -latest -property installationPath 2>&1) } 'vswhere' -AllowFailure
+        foreach ($p in $script:vsPaths) { if ($p) { $candidates += (Join-Path $p 'VC\Tools\Llvm\x64\bin') } }
     }
-    Die "x64-hosted clang-cl not found under Visual Studio."
+    # Fall back to scanning, for installs vswhere does not know about.
+    foreach ($root in @("$env:ProgramFiles\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")) {
+        Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object {
+            Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $candidates += (Join-Path $_.FullName 'VC\Tools\Llvm\x64\bin')
+            }
+        }
+    }
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path (Join-Path $c 'clang-cl.exe'))) { return $c }
+    }
+    Die ("x64-hosted clang-cl not found. Searched:`n  " + (($candidates | Select-Object -Unique) -join "`n  ") +
+         "`nInstall the 'C++ Clang tools for Windows' component - MSVC cannot build SpiderMonkey.")
 }
 
 # --- prerequisites ---------------------------------------------------------
