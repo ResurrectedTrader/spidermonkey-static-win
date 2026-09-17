@@ -8,6 +8,7 @@ on:
     inputs:
       version:
         description: Firefox ESR version (e.g. 153.3.0esr)
+        type: string
         required: true
         default: 153.3.0esr
       publish:
@@ -33,6 +34,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # A typo here would otherwise surface as a confusing 404 partway through
+      # the download step, after the toolchain work has already run.
+      - name: Check the version exists
+        shell: pwsh
+        run: |
+          $v = '${{ inputs.version }}'
+          if ($v -notmatch '^\d+\.\d+(\.\d+)?esr$') {
+            throw "'$v' does not look like an ESR version (expected e.g. 153.3.0esr)."
+          }
+          $url = "https://ftp.mozilla.org/pub/firefox/releases/$v/source/firefox-$v.source.tar.xz"
+          try   { $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 60 }
+          catch { throw "No source tarball for '$v' at $url" }
+          "$v is available ($([math]::Round($r.Headers.'Content-Length'[0]/1MB)) MB)"
 
       # SpiderMonkey cannot be built with MSVC proper - clang-cl is mandatory.
       # The runner image ships Visual Studio, but whether the Clang component is
@@ -76,19 +91,22 @@ jobs:
 
       # Package before deleting anything: the objdir is only needed until the
       # single .lib exists.
+      # The version goes in the filename: without it, artifacts from runs of
+      # different ESR lines are indistinguishable once downloaded.
       - name: Zip the distribution
         shell: pwsh
         run: |
-          $tag = "${{ matrix.arch }}-$("${{ matrix.config }}".ToLower())"
+          $tag  = "${{ matrix.arch }}-$("${{ matrix.config }}".ToLower())"
+          $name = "spidermonkey-${{ inputs.version }}-$tag"
           $dist = "C:\sm\dist-$tag"
           if (-not (Test-Path "$dist\spidermonkey.lib")) { throw "no library at $dist" }
-          Compress-Archive -Path "$dist\*" -DestinationPath "$env:GITHUB_WORKSPACE\spidermonkey-$tag.zip" -CompressionLevel Optimal
-          "{0,-28} {1:N0} MB" -f "spidermonkey-$tag.zip", ((Get-Item "$env:GITHUB_WORKSPACE\spidermonkey-$tag.zip").Length/1MB)
+          Compress-Archive -Path "$dist\*" -DestinationPath "$env:GITHUB_WORKSPACE\$name.zip" -CompressionLevel Optimal
+          "{0} {1:N0} MB" -f "$name.zip", ((Get-Item "$env:GITHUB_WORKSPACE\$name.zip").Length/1MB)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spidermonkey-${{ matrix.arch }}-${{ matrix.config }}
+          name: spidermonkey-${{ inputs.version }}-${{ matrix.arch }}-${{ matrix.config }}
           path: spidermonkey-*.zip
           retention-days: 7
           compression-level: 0   # already a zip
