@@ -22,7 +22,8 @@ Output per configuration, under `dist-<arch>-<config>\`:
 |---|---|
 | `spidermonkey.lib` | everything, one archive |
 | `include\` | the `dist/include` headers (665 files) |
-| `README.txt` | the defines and system libs a consumer needs |
+| `README.txt` | the defines, system libs and toolset a consumer needs |
+| `toolset.txt` | the MSVC toolset it was built with, machine-readable |
 
 Budget roughly an hour per configuration on fast hardware. `-Arch` and `-Config`
 each take `both` or a single value, so the matrix can be built a piece at a time.
@@ -216,6 +217,15 @@ Counts differ per configuration (Debug pulls ~100 more objects), so the list is
 derived from each build rather than hardcoded.
 
 ## Consuming the result
+
+The MSVC toolset matters as much as the defines. A published archive is named
+`...-msvc<x.y>.zip`, and that is a **floor, not a match**: link it with that
+toolset or any newer one. Building against an *older* one fails with undefined
+`__std_*` symbols — MSVC's STL headers call helpers that ship in its own
+`libcpmt.lib`, and each release only adds to that set (14.29 defines 125 of them,
+14.44 defines 231, 14.50 defines 280, and none are ever dropped). That is why the
+workflow defaults to the older runner image: it costs nothing and widens who can
+link the result.
 
 ```
 /DSTATIC_JS_API        # or JS_PUBLIC_API becomes __declspec(dllimport)

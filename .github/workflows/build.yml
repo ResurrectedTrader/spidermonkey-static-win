@@ -11,6 +11,16 @@ on:
         type: string
         required: true
         default: 153.3.0esr
+      runner:
+        # A library is only linkable by a toolchain at least as new as the one
+        # that built it: MSVC's STL headers call helpers that live in its own
+        # libcpmt.lib, so a consumer on an older Visual Studio gets undefined
+        # __std_* symbols. Building on the older image keeps the artifacts
+        # usable by both.
+        description: Runner image - windows-2022 (VS 2022) builds artifacts that link on more machines
+        type: choice
+        options: [windows-2022, windows-latest]
+        default: windows-2022
       publish:
         description: Publish the artifacts as a release
         type: boolean
@@ -18,7 +28,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ inputs.runner }}
     # GitHub's hard ceiling is 360. Hosted runners are 4 vCPU, so a cold
     # SpiderMonkey build is much slower here than on a workstation; this leaves
     # room without letting a hung build burn the full allowance.
@@ -78,24 +88,34 @@ jobs:
       # Package before deleting anything: the objdir is only needed until the
       # single .lib exists.
       # The version goes in the filename: without it, artifacts from runs of
-      # different ESR lines are indistinguishable once downloaded.
+      # different ESR lines are indistinguishable once downloaded. So does the
+      # MSVC toolset, which is what decides whether a consumer can link the
+      # archive at all. The build wrote it to toolset.txt, so the two cannot
+      # drift.
       - name: Zip the distribution
+        id: zip
         shell: pwsh
         run: |
           $tag  = "${{ matrix.arch }}-$("${{ matrix.config }}".ToLower())"
-          $name = "spidermonkey-${{ inputs.version }}-$tag"
           $dist = "C:\sm\dist-$tag"
           if (-not (Test-Path "$dist\spidermonkey.lib")) { throw "no library at $dist" }
+          if (-not (Test-Path "$dist\toolset.txt"))      { throw "no toolset.txt at $dist" }
+          $msvc = (Get-Content "$dist\toolset.txt" -Raw).Trim()
+          $name = "spidermonkey-${{ inputs.version }}-$tag-msvc$msvc"
           Compress-Archive -Path "$dist\*" -DestinationPath "$env:GITHUB_WORKSPACE\$name.zip" -CompressionLevel Optimal
-          "{0} {1:N0} MB" -f "$name.zip", ((Get-Item "$env:GITHUB_WORKSPACE\$name.zip").Length/1MB)
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "{0} {1:N0} MB (needs MSVC {2} or newer)" -f "$name.zip", ((Get-Item "$env:GITHUB_WORKSPACE\$name.zip").Length/1MB), $msvc
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spidermonkey-${{ inputs.version }}-${{ matrix.arch }}-${{ matrix.config }}
+          name: ${{ steps.zip.outputs.name }}
           path: spidermonkey-*.zip
           retention-days: 7
           compression-level: 0   # already a zip
+          # Re-running for a version already built replaces its artifact rather
+          # than failing on the name.
+          overwrite: true
 
       # A failed build is worth diagnosing without re-running an hour of work.
       - name: Upload logs on failure
@@ -122,24 +142,41 @@ jobs:
           merge-multiple: true
       # Each zip is well under the 2 GiB per-asset limit; a combined archive
       # would not be, so they are published separately.
-      - name: Create release
+      # Re-running for a version that already has a release replaces its assets
+      # and its notes, rather than failing on the existing tag.
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la *.zip
-          gh release create "spidermonkey-${{ inputs.version }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "SpiderMonkey ${{ inputs.version }}" \
-            --notes "Static SpiderMonkey libraries built against the static CRT.
+          tag="spidermonkey-${{ inputs.version }}"
+
+          cat > notes.md <<'EOF'
+          Static SpiderMonkey libraries built against the static CRT.
 
           | Configuration | CRT | Consumer defines |
           |---|---|---|
-          | x64/x86 Release | \`/MT\` (\`libcmt\`) | \`STATIC_JS_API\` \`XP_WIN\` |
-          | x64/x86 Debug | \`/MTd\` (\`libcmtd\`) | \`STATIC_JS_API\` \`XP_WIN\` \`DEBUG\` |
+          | x64/x86 Release | `/MT` (`libcmt`) | `STATIC_JS_API` `XP_WIN` |
+          | x64/x86 Debug | `/MTd` (`libcmtd`) | `STATIC_JS_API` `XP_WIN` `DEBUG` |
 
-          Link \`mincore.lib\` alongside the usual Win32 set. Each archive contains
-          \`spidermonkey.lib\`, \`include/\` and a \`README.txt\`.
+          Link `mincore.lib` alongside the usual Win32 set. Each archive contains
+          `spidermonkey.lib`, `include/`, a `README.txt` and a `toolset.txt`.
+
+          The `msvc<x.y>` in each filename is the MSVC toolset the library was built
+          with, and it is a **floor, not a match**: link it with that toolset or any
+          newer one. An older toolset fails with undefined `__std_*` symbols, because
+          MSVC's STL headers call helpers that ship in its own `libcpmt.lib` and each
+          release only adds to that set.
 
           Every configuration was verified by linking a DLL and executing JavaScript
-          through it, and by confirming zero dynamic-CRT imports." \
-            *.zip
+          through it, and by confirming zero dynamic-CRT imports.
+          EOF
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "SpiderMonkey ${{ inputs.version }}" --notes-file notes.md
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber *.zip
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "SpiderMonkey ${{ inputs.version }}" --notes-file notes.md *.zip
+          fi

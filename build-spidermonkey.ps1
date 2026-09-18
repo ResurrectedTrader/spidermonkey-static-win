@@ -115,6 +115,32 @@ function Get-SevenZip {
     Die "7-Zip not found. Install it (needed to unpack the NSIS/zst payloads)."
 }
 
+# The MSVC toolset behind that clang-cl, which is the one thing a consumer has
+# to match: its STL headers call helpers that live in its own libcpmt.lib, so
+# linking against this library needs that toolset or newer. Identified by
+# toolset version rather than by Visual Studio year, because the two do not
+# correspond - the same toolset ships under more than one year.
+function Get-MsvcToolset {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) { return $null }
+
+    Invoke-Native { $script:vsPath = @(& $vswhere -latest -property installationPath 2>&1) } 'vswhere' -AllowFailure
+    Invoke-Native { $script:vsName = @(& $vswhere -latest -property displayName 2>&1) } 'vswhere' -AllowFailure
+    $root = $script:vsPath | Where-Object { $_ } | Select-Object -First 1
+    if (-not $root) { return $null }
+
+    $toolset = Get-ChildItem (Join-Path $root 'VC\Tools\MSVC') -Directory -ErrorAction SilentlyContinue |
+               Sort-Object { [version]$_.Name } | Select-Object -Last 1
+    if (-not $toolset) { return $null }
+
+    $parts = $toolset.Name.Split('.')
+    [pscustomobject]@{
+        Version = $toolset.Name
+        Short   = "$($parts[0]).$($parts[1])"
+        Display = ($script:vsName | Where-Object { $_ } | Select-Object -First 1)
+    }
+}
+
 function Get-LlvmBin {
     # The x64-hosted clang-cl bundled with Visual Studio. Located via vswhere
     # rather than a guessed path: the edition directory differs between
@@ -398,15 +424,24 @@ function New-MergedLib {
     Copy-Item "$ObjDir\dist\include" $incOut -Recurse
     Ok "headers: $incOut"
 
+    $toolset   = Get-MsvcToolset
+    $builtWith = if ($toolset) { "$($toolset.Version)  ($($toolset.Display))" } else { 'unknown' }
+
     @"
 SpiderMonkey $Version ($Arch $Config), static CRT ($(if ($Config -eq 'Debug') { '/MTd' } else { '/MT' })).
 
   link against : spidermonkey.lib
   include path : include
   required defines : STATIC_JS_API  XP_WIN$(if ($Config -eq 'Debug') { '  DEBUG' })
+  built with       : MSVC $builtWith
   extra system libs: mincore.lib (QueryUnbiasedInterruptTimePrecise)
                      plus ws2_32 advapi32 user32 ole32 oleaut32 shell32
                      userenv bcrypt ntdll dbghelp psapi winmm shlwapi
+
+Link this with MSVC $(if ($toolset) { $toolset.Short } else { 'the same toolset' }) or newer. An older toolset fails with
+undefined __std_* symbols: the STL headers this was compiled against call
+helpers that ship in that toolset's own libcpmt.lib. The toolset version is what
+matters, not the Visual Studio year - one toolset ships under several years.
 
 $(if ($Config -eq 'Debug') { @'
 NOTE: a debug engine requires DEBUG to be defined by the consumer. js-config.h
@@ -420,6 +455,10 @@ Built from firefox-$Version with:
   CFLAGS/CXXFLAGS = $(if ($Config -eq 'Debug') { '-MTd' } else { '-MT' })
   RUSTFLAGS       = -Ctarget-feature=+crt-static
 "@ | Set-Content -Encoding ascii (Join-Path $dist 'README.txt')
+
+    # Machine-readable counterpart to the "built with" line above, so packaging
+    # can label an archive with the toolset it needs without re-deriving it.
+    if ($toolset) { $toolset.Short | Set-Content -Encoding ascii (Join-Path $dist 'toolset.txt') }
 
     return $outLib
 }
