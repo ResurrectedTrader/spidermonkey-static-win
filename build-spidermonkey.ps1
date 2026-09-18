@@ -194,7 +194,7 @@ function Initialize-Prereqs {
     if (-not (Test-Path "$env:USERPROFILE\.cargo\bin\cbindgen.exe")) {
         Info "installing cbindgen (compiles from source, a minute or two)"
         $env:RUSTUP_TOOLCHAIN = 'stable'
-        Invoke-Native { cargo install cbindgen 2>&1 | Out-Null } 'cargo install cbindgen'
+        Invoke-Native { cargo install cbindgen 2>&1 | Write-Host } "cargo install cbindgen"
     }
     Invoke-Native { $script:cbv = (& "$env:USERPROFILE\.cargo\bin\cbindgen.exe" --version 2>&1) } 'cbindgen --version'
     Ok "cbindgen: $script:cbv"
@@ -226,7 +226,7 @@ function Get-Sources {
     $srcDir = Join-Path $Root "firefox-$($Version -replace 'esr$','')"
     if (-not (Test-Path $srcDir)) {
         Info "extracting source (several GB, takes a few minutes)"
-        Invoke-Native { & tar -xJf $tarball -C $Root 2>&1 | Out-Null } 'tar extract'
+        Invoke-Native { & tar -xJf $tarball -C $Root 2>&1 | Write-Host } 'tar extract'
         if (-not (Test-Path $srcDir)) { Die "extraction did not produce $srcDir" }
     }
     Ok "source: $srcDir"
@@ -331,20 +331,25 @@ function Invoke-MachBuild {
 
     Push-Location $Paths.Src
     try {
+        # Teed rather than redirected: mach is the long pole, and a step that
+        # prints nothing for an hour cannot be told apart from one that has hung
+        # - which matters here, because mach is known to block forever on a
+        # first-run prompt under a non-interactive shell. The log is only
+        # collected after the job ends, far too late to make that call.
+        $cfgLog = Join-Path $Root "cfg-$tag.log"
         Info "configure ($Arch $Config)"
-        Invoke-Native { & $script:Python -u ./mach configure *> (Join-Path $Root "cfg-$tag.log") } 'configure' -AllowFailure
-        if ($LASTEXITCODE -ne 0) {
-            Get-Content (Join-Path $Root "cfg-$tag.log") -Tail 25
-            Die "configure failed ($tag); see cfg-$tag.log"
-        }
+        Invoke-Native {
+            & $script:Python -u ./mach configure 2>&1 | Tee-Object -FilePath $cfgLog
+        } 'configure' -AllowFailure
+        if ($LASTEXITCODE -ne 0) { Die "configure failed ($tag); see cfg-$tag.log" }
         Ok "configure complete"
 
+        $buildLog = Join-Path $Root "build-$tag.log"
         Info "build ($Arch $Config) - this takes a while"
-        Invoke-Native { & $script:Python -u ./mach build *> (Join-Path $Root "build-$tag.log") } 'build' -AllowFailure
-        if ($LASTEXITCODE -ne 0) {
-            Get-Content (Join-Path $Root "build-$tag.log") -Tail 25
-            Die "build failed ($tag); see build-$tag.log"
-        }
+        Invoke-Native {
+            & $script:Python -u ./mach build 2>&1 | Tee-Object -FilePath $buildLog
+        } 'build' -AllowFailure
+        if ($LASTEXITCODE -ne 0) { Die "build failed ($tag); see build-$tag.log" }
         Ok "build complete"
     } finally { Pop-Location }
 
