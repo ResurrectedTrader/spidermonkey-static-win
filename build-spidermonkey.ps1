@@ -215,6 +215,72 @@ function Initialize-Prereqs {
 
 # --- source + tools --------------------------------------------------------
 
+# Unpacking the Firefox source is a quarter of a million small files, and takes
+# ten minutes on one CI image and over ninety on another - three runs were
+# cancelled at between 70 and 119 minutes without it finishing. tar says nothing
+# at all without -v, so every one of those looked identical from the outside.
+#
+# Counting tar's own output is not enough: a throttle that prints every N
+# entries prints nothing when nothing is coming out, which is the case that
+# needs reporting. So tar runs detached with its listing going to a file, and
+# the heartbeat comes off a timer instead - it reports every 30 seconds whether
+# or not tar has produced anything, and how far the listing has got.
+#
+# Windows' own bsdtar by full path, never `tar` off PATH. Git, MSYS and Cygwin
+# all put a GNU tar there, and GNU tar reads "C:\sm" as a remote host named C
+# and goes looking for it:
+#     tar (child): Cannot connect to C: resolve failed
+# Where that lookup fails fast the build dies early; where it blocks, tar waits
+# on it forever having printed nothing, which is what a stalled extract looks
+# like from the outside.
+function Expand-Tarball {
+    param([string]$Tarball, [string]$Dest)
+
+    $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    if (-not (Test-Path $tar)) {
+        $tar = (Get-Command tar -ErrorAction SilentlyContinue).Source
+        if (-not $tar) { Die 'no tar: neither System32 nor PATH has one' }
+        Warn "no bsdtar in System32, falling back to $tar"
+    }
+    Ok "tar: $tar"
+    Invoke-Native { & $tar --version 2>&1 | Select-Object -First 1 | Write-Host } 'tar --version' -AllowFailure
+
+    $outLog = Join-Path $Root 'extract.out.log'
+    $errLog = Join-Path $Root 'extract.err.log'
+    $p = Start-Process -FilePath $tar -ArgumentList @('-xJvf', $Tarball, '-C', $Dest) `
+                       -NoNewWindow -PassThru `
+                       -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    # Touching Handle caches it. Without that, Start-Process releases it when the
+    # process ends and ExitCode reads back empty - the run looks like a failure
+    # whatever tar actually did.
+    $null = $p.Handle
+
+    $started = Get-Date
+    while (-not $p.WaitForExit(30000)) {
+        $bytes = 0
+        $tail  = ''
+        # bsdtar writes the listing to stderr and GNU tar to stdout, so watch
+        # both rather than betting on which one is installed.
+        foreach ($f in @($outLog, $errLog)) {
+            if (Test-Path $f) {
+                $fi = Get-Item $f
+                $bytes += $fi.Length
+                if ($fi.Length -gt 0) { $tail = Get-Content $f -Tail 1 -ErrorAction SilentlyContinue }
+            }
+        }
+        Warn ("{0:hh\:mm\:ss} elapsed, {1,8:N0} KB listed{2}" -f `
+              ((Get-Date) - $started), ($bytes / 1KB), $(if ($tail) { ", at $tail" } else { ' (nothing yet)' }))
+    }
+    # Reading ExitCode off a Start-Process object is only reliable after the
+    # parameterless wait; the timed overload above can leave it unset.
+    $p.WaitForExit()
+    if ($p.ExitCode -ne 0) {
+        if (Test-Path $errLog) { Get-Content $errLog -Tail 20 | Write-Host }
+        Die "tar extract failed (exit $($p.ExitCode))"
+    }
+    Ok ("extracted in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
+}
+
 function Get-Sources {
     $7z  = Get-SevenZip
     $dl  = Join-Path $Root 'dl'
@@ -226,18 +292,7 @@ function Get-Sources {
     $srcDir = Join-Path $Root "firefox-$($Version -replace 'esr$','')"
     if (-not (Test-Path $srcDir)) {
         Info "extracting source (several GB, takes a few minutes)"
-        # Without -v tar says nothing at all, and this unpacks a quarter of a
-        # million small files: on a slow filesystem the step is indistinguishable
-        # from a hang, which is exactly how three CI runs were cancelled. The
-        # full listing is a quarter of a million lines of noise, so keep one line
-        # per 5000 entries - enough to tell crawling from stopped, and to say
-        # where it stopped.
-        Invoke-Native {
-            $n = 0
-            & tar -xJvf $tarball -C $Root 2>&1 | ForEach-Object {
-                if (++$n % 5000 -eq 0) { Write-Host ("    {0,7:N0} entries  {1}" -f $n, $_) }
-            }
-        } 'tar extract'
+        Expand-Tarball $tarball $Root
         if (-not (Test-Path $srcDir)) { Die "extraction did not produce $srcDir" }
     }
     Ok "source: $srcDir"
