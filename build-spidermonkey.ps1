@@ -339,7 +339,7 @@ function Invoke-MachBuild {
         $cfgLog = Join-Path $Root "cfg-$tag.log"
         Info "configure ($Arch $Config)"
         Invoke-Native {
-            & $script:Python -u ./mach configure 2>&1 | Tee-Object -FilePath $cfgLog
+            & $script:Python -u ./mach configure 2>&1 | Tee-Object -FilePath $cfgLog | Out-Host
         } 'configure' -AllowFailure
         if ($LASTEXITCODE -ne 0) { Die "configure failed ($tag); see cfg-$tag.log" }
         Ok "configure complete"
@@ -347,7 +347,7 @@ function Invoke-MachBuild {
         $buildLog = Join-Path $Root "build-$tag.log"
         Info "build ($Arch $Config) - this takes a while"
         Invoke-Native {
-            & $script:Python -u ./mach build 2>&1 | Tee-Object -FilePath $buildLog
+            & $script:Python -u ./mach build 2>&1 | Tee-Object -FilePath $buildLog | Out-Host
         } 'build' -AllowFailure
         if ($LASTEXITCODE -ne 0) { Die "build failed ($tag); see build-$tag.log" }
         Ok "build complete"
@@ -532,7 +532,7 @@ extern "C" __declspec(dllexport) int SpikeRun() {
                     '/DSTATIC_JS_API', '/DXP_WIN', '/DWIN32', '/D_WINDOWS',
                     "/I$dist\include", 'verify.cpp', '/Foverify.obj')
         Invoke-Native {
-            & "$llvm\clang-cl.exe" @cargs 2>&1 | Where-Object { $_ -match 'error' }
+            & "$llvm\clang-cl.exe" @cargs 2>&1 | Where-Object { $_ -match 'error' } | Out-Host
         } 'verify compile' -AllowFailure
         if (-not (Test-Path 'verify.obj')) { Die "verify compile failed ($Arch $Config)" }
 
@@ -543,7 +543,7 @@ extern "C" __declspec(dllexport) int SpikeRun() {
         if ($Arch -eq 'x86') { $args += '/MACHINE:X86' }
         $args += 'verify.obj'; $args += $Lib; $args += $sys
         $args | Set-Content -Encoding ascii 'verify.rsp'
-        Invoke-Native { & "$llvm\lld-link.exe" '@verify.rsp' 2>&1 | Where-Object { $_ -match 'error' } } 'verify link' -AllowFailure
+        Invoke-Native { & "$llvm\lld-link.exe" '@verify.rsp' 2>&1 | Where-Object { $_ -match 'error' } | Out-Host } 'verify link' -AllowFailure
         if (-not (Test-Path 'verify.dll')) { Die "verify link failed ($Arch $Config)" }
 
         Invoke-Native {
