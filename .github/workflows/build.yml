@@ -45,6 +45,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Unpacking the source runs at a flat ~120 files/second on this image -
+      # roughly 8 ms per file, constant across seventeen minutes of heartbeat
+      # samples. A constant per-file cost that high is scanning overhead, not
+      # disk throughput; the Server 2025 image, which does not run real-time
+      # protection, does the same work three to six times faster.
+      #
+      # Safe here: the runner is single-tenant, built from a GitHub image, and
+      # destroyed when the job ends. It reports whether it was accepted, so the
+      # next timing can be read against a known state rather than an assumed one.
+      - name: Exclude the build root from Defender
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\sm | Out-Null
+          try {
+            Add-MpPreference -ExclusionPath C:\sm -ErrorAction Stop
+            "excluded C:\sm from real-time scanning"
+          } catch {
+            "could not set a Defender exclusion: $($_.Exception.Message)"
+          }
+
       # PowerShell only discovers that a function does not exist when the line
       # calling it runs, and in this script that can be an hour in. Cheaper to
       # ask the parser first.

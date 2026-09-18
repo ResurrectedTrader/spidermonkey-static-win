@@ -327,8 +327,16 @@ function Expand-Tarball {
     Ok "tar: $tar"
     Invoke-Native { & $tar --version 2>&1 | Select-Object -First 1 | Write-Host } 'tar --version' -AllowFailure
 
-    Info "unpacking $(Split-Path $tarPath -Leaf)"
-    Invoke-Watched $tar @('-xvf', $tarPath, '-C', $Dest) 'tar extract' 'extract'
+    # Firefox's web-platform test corpus is hundreds of thousands of tiny .html
+    # and .ini files, and the standalone JavaScript engine never reads one of
+    # them. Timing the heartbeat against the paths it reported, 88 of 155 ticks
+    # - 57% of a seventeen-minute unpack - were inside testing/web-platform.
+    # Extraction here is bound by per-file cost, not by bytes, so not creating
+    # those files is the single largest saving available.
+    Info "unpacking $(Split-Path $tarPath -Leaf) (without the web-platform tests)"
+    Invoke-Watched $tar `
+        @('-xvf', $tarPath, '-C', $Dest, '--exclude', 'firefox-*/testing/web-platform/*') `
+        'tar extract' 'extract'
     Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
 }
 
