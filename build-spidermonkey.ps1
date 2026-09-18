@@ -233,11 +233,93 @@ function Initialize-Prereqs {
 # Where that lookup fails fast the build dies early; where it blocks, tar waits
 # on it forever having printed nothing, which is what a stalled extract looks
 # like from the outside.
+# Run a long tool detached and report every thirty seconds how long it has been
+# going and how far its output has got - whether or not it has produced any. A
+# heartbeat driven by the tool's own output prints nothing in the one case worth
+# reporting, which is the tool that has stopped producing output entirely.
+function Invoke-Watched {
+    param(
+        [string]$Exe,
+        [string[]]$Arguments,
+        [string]$What,
+        [string]$LogPrefix,
+        [string]$Produces
+    )
+    $outLog = Join-Path $Root "$LogPrefix.out.log"
+    $errLog = Join-Path $Root "$LogPrefix.err.log"
+    $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -PassThru `
+                       -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    # Touching Handle caches it. Without that, Start-Process releases it when the
+    # process ends and ExitCode reads back empty - every run looks like a failure
+    # whatever the tool actually did.
+    $null = $p.Handle
+
+    $started = Get-Date
+    while (-not $p.WaitForExit(30000)) {
+        $note = ''
+        if ($Produces -and (Test-Path $Produces)) {
+            $note = ", {0:N0} MB written" -f ((Get-Item $Produces).Length / 1MB)
+        } else {
+            $bytes = 0
+            $tail  = ''
+            # bsdtar writes its listing to stderr and GNU tar to stdout, so watch
+            # both rather than betting on which one is installed.
+            foreach ($f in @($outLog, $errLog)) {
+                if (Test-Path $f) {
+                    $fi = Get-Item $f
+                    $bytes += $fi.Length
+                    if ($fi.Length -gt 0) { $tail = Get-Content $f -Tail 1 -ErrorAction SilentlyContinue }
+                }
+            }
+            $note = ", {0,8:N0} KB logged" -f ($bytes / 1KB)
+            if ($tail) { $note += ", at $tail" }
+        }
+        Warn2 ("{0:hh\:mm\:ss} elapsed{1}" -f ((Get-Date) - $started), $note)
+    }
+    # Reading ExitCode off a Start-Process object is only reliable after the
+    # parameterless wait; the timed overload above can leave it unset.
+    $p.WaitForExit()
+    if ($p.ExitCode -ne 0) {
+        foreach ($f in @($errLog, $outLog)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) { Get-Content $f -Tail 20 | Write-Host }
+        }
+        Die "$What failed (exit $($p.ExitCode))"
+    }
+    Ok ("$What finished in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
+}
+
+# Windows ships bsdtar, but which codecs it was built with varies by release,
+# and Windows Server 2022's was built without liblzma:
+#
+#   Server 2022 : bsdtar 3.8.4 - libarchive 3.8.4 zlib/1.2.5.f-ipp cng/2.0 libb2/bundled
+#   Windows 11  : bsdtar 3.8.8 - libarchive 3.8.8 zlib/... liblzma/5.8.1 bz2lib/1.0.8 ...
+#
+# Handed a .tar.xz it cannot decode, it neither extracts anything nor exits -
+# three CI runs sat on it for between 70 and 119 minutes and were cancelled,
+# having written no files and printed not one line. The same tarball on the
+# Server 2025 image, whose bsdtar has liblzma, unpacks in ten minutes.
+#
+# So the xz and the tar are decoded separately: 7-Zip - already required here
+# for the NSIS and zstd payloads - does the xz, and tar unpacks the plain tar it
+# leaves behind. One path on every machine, rather than one that depends on how
+# the image's tar happened to be compiled.
 function Expand-Tarball {
     param([string]$Tarball, [string]$Dest)
 
+    $tarPath = Join-Path (Split-Path $Tarball -Parent) `
+                         ((Split-Path $Tarball -Leaf) -replace '\.xz$', '')
+    if (-not (Test-Path $tarPath)) {
+        Info "decompressing $(Split-Path $Tarball -Leaf) (~4 GB of tar)"
+        Invoke-Watched (Get-SevenZip) `
+            @('e', '-txz', '-y', "-o$(Split-Path $tarPath -Parent)", $Tarball) `
+            'xz decode' 'unxz' $tarPath
+    }
+
     $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
     if (-not (Test-Path $tar)) {
+        # Not `tar` off PATH by preference: Git, MSYS and Cygwin all install a
+        # GNU tar there, and GNU tar reads a "C:\sm" destination as a remote
+        # host named C and goes looking for it.
         $tar = (Get-Command tar -ErrorAction SilentlyContinue).Source
         if (-not $tar) { Die 'no tar: neither System32 nor PATH has one' }
         Warn2 "no bsdtar in System32, falling back to $tar"
@@ -245,40 +327,9 @@ function Expand-Tarball {
     Ok "tar: $tar"
     Invoke-Native { & $tar --version 2>&1 | Select-Object -First 1 | Write-Host } 'tar --version' -AllowFailure
 
-    $outLog = Join-Path $Root 'extract.out.log'
-    $errLog = Join-Path $Root 'extract.err.log'
-    $p = Start-Process -FilePath $tar -ArgumentList @('-xJvf', $Tarball, '-C', $Dest) `
-                       -NoNewWindow -PassThru `
-                       -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-    # Touching Handle caches it. Without that, Start-Process releases it when the
-    # process ends and ExitCode reads back empty - the run looks like a failure
-    # whatever tar actually did.
-    $null = $p.Handle
-
-    $started = Get-Date
-    while (-not $p.WaitForExit(30000)) {
-        $bytes = 0
-        $tail  = ''
-        # bsdtar writes the listing to stderr and GNU tar to stdout, so watch
-        # both rather than betting on which one is installed.
-        foreach ($f in @($outLog, $errLog)) {
-            if (Test-Path $f) {
-                $fi = Get-Item $f
-                $bytes += $fi.Length
-                if ($fi.Length -gt 0) { $tail = Get-Content $f -Tail 1 -ErrorAction SilentlyContinue }
-            }
-        }
-        Warn2 ("{0:hh\:mm\:ss} elapsed, {1,8:N0} KB listed{2}" -f `
-              ((Get-Date) - $started), ($bytes / 1KB), $(if ($tail) { ", at $tail" } else { ' (nothing yet)' }))
-    }
-    # Reading ExitCode off a Start-Process object is only reliable after the
-    # parameterless wait; the timed overload above can leave it unset.
-    $p.WaitForExit()
-    if ($p.ExitCode -ne 0) {
-        if (Test-Path $errLog) { Get-Content $errLog -Tail 20 | Write-Host }
-        Die "tar extract failed (exit $($p.ExitCode))"
-    }
-    Ok ("extracted in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
+    Info "unpacking $(Split-Path $tarPath -Leaf)"
+    Invoke-Watched $tar @('-xvf', $tarPath, '-C', $Dest) 'tar extract' 'extract'
+    Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
 }
 
 function Get-Sources {
