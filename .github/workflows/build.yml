@@ -45,25 +45,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Unpacking the source runs at a flat ~120 files/second on this image -
-      # roughly 8 ms per file, constant across seventeen minutes of heartbeat
-      # samples. A constant per-file cost that high is scanning overhead, not
-      # disk throughput; the Server 2025 image, which does not run real-time
-      # protection, does the same work three to six times faster.
+      # Build on D:, the runner's local temp disk, not on C:, the OS disk.
+      # Unpacking the source is the largest single cost in this build - an hour
+      # of it against nine minutes of compiling - and it is bound by per-file
+      # cost. Measured on this image, extracting the same 72,349 files:
       #
-      # Safe here: the runner is single-tenant, built from a GitHub image, and
-      # destroyed when the job ends. It reports whether it was accepted, so the
-      # next timing can be read against a known state rather than an assumed one.
-      - name: Exclude the build root from Defender
+      #     C:  bsdtar 795 files/sec    7-Zip 802 files/sec
+      #     D:  bsdtar 5,467 files/sec  7-Zip 3,280 files/sec
+      #
+      # Seven times faster for the same work, and the extractor makes almost no
+      # difference - it was never the tool. Real-time protection is already off
+      # on this image, so it was never the scanner either.
+      #
+      # Falls back to C: rather than assuming D: exists and is big enough: it is
+      # image-dependent, and a build root that runs out of space fails late and
+      # confusingly.
+      - name: Choose a build root
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force C:\sm | Out-Null
-          try {
-            Add-MpPreference -ExclusionPath C:\sm -ErrorAction Stop
-            "excluded C:\sm from real-time scanning"
-          } catch {
-            "could not set a Defender exclusion: $($_.Exception.Message)"
+          $root = 'C:\sm'
+          $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'" -ErrorAction SilentlyContinue
+          if ($d -and $d.FreeSpace -gt 40GB) {
+            $root = 'D:\sm'
+          } else {
+            "no D: with 40 GB free - falling back to $root, expect a slow extraction"
           }
+          "SM_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $free = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($root.Substring(0,2))'").FreeSpace
+          "build root: $root ({0:N0} GB free)" -f ($free / 1GB)
 
       # PowerShell only discovers that a function does not exist when the line
       # calling it runs, and in this script that can be an hour in. Cheaper to
@@ -106,7 +115,7 @@ jobs:
         shell: pwsh
         run: |
           .\build-spidermonkey.ps1 `
-            -Root C:\sm `
+            -Root ${{ env.SM_ROOT }} `
             -Arch ${{ matrix.arch }} `
             -Config ${{ matrix.config }} `
             -Version ${{ inputs.version }} `
@@ -124,7 +133,7 @@ jobs:
         shell: pwsh
         run: |
           $tag  = "${{ matrix.arch }}-$("${{ matrix.config }}".ToLower())"
-          $dist = "C:\sm\dist-$tag"
+          $dist = "$env:SM_ROOT\dist-$tag"
           if (-not (Test-Path "$dist\spidermonkey.lib")) { throw "no library at $dist" }
           if (-not (Test-Path "$dist\toolset.txt"))      { throw "no toolset.txt at $dist" }
           $msvc = (Get-Content "$dist\toolset.txt" -Raw).Trim()
@@ -161,7 +170,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.arch }}-${{ matrix.config }}
-          path: C:\sm\*.log
+          path: ${{ env.SM_ROOT }}\*.log
           retention-days: 7
           if-no-files-found: ignore
 
