@@ -59,6 +59,27 @@ jobs:
           catch { throw "No source tarball for '$v' at $url" }
           "$v is available ($([math]::Round($r.Headers.'Content-Length'[0]/1MB)) MB)"
 
+      # Unpacking the Firefox source takes ten minutes on the Server 2025 image
+      # and over ninety on Server 2022 - long enough that three runs were
+      # cancelled before it ever finished. Real-time scanning of a quarter of a
+      # million small file writes is the leading suspect (2025 ships with it
+      # off, 2022 does not), so exclude the build root and see. It is a guess,
+      # which is why it reports whether it took: if the extract is still slow
+      # with this in place, the cause is elsewhere and the entry counter the
+      # build now prints will say where.
+      #
+      # Safe on a hosted runner: the machine is single-tenant, built from a
+      # GitHub image, and destroyed when the job ends.
+      - name: Exclude the build root from Defender
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath C:\sm -ErrorAction Stop
+            "excluded C:\sm from real-time scanning"
+          } catch {
+            "could not set a Defender exclusion: $($_.Exception.Message)"
+          }
+
       # SpiderMonkey cannot be built with MSVC proper - clang-cl is mandatory.
       # The runner image ships Visual Studio, but whether the Clang component is
       # included has varied, so fail loudly here rather than 40 minutes in.

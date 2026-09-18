@@ -226,7 +226,18 @@ function Get-Sources {
     $srcDir = Join-Path $Root "firefox-$($Version -replace 'esr$','')"
     if (-not (Test-Path $srcDir)) {
         Info "extracting source (several GB, takes a few minutes)"
-        Invoke-Native { & tar -xJf $tarball -C $Root 2>&1 | Write-Host } 'tar extract'
+        # Without -v tar says nothing at all, and this unpacks a quarter of a
+        # million small files: on a slow filesystem the step is indistinguishable
+        # from a hang, which is exactly how three CI runs were cancelled. The
+        # full listing is a quarter of a million lines of noise, so keep one line
+        # per 5000 entries - enough to tell crawling from stopped, and to say
+        # where it stopped.
+        Invoke-Native {
+            $n = 0
+            & tar -xJvf $tarball -C $Root 2>&1 | ForEach-Object {
+                if (++$n % 5000 -eq 0) { Write-Host ("    {0,7:N0} entries  {1}" -f $n, $_) }
+            }
+        } 'tar extract'
         if (-not (Test-Path $srcDir)) { Die "extraction did not produce $srcDir" }
     }
     Ok "source: $srcDir"
