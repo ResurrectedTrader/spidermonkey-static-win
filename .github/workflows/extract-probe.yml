@@ -1,0 +1,103 @@
+name: Probe extraction speed
+
+# Unpacking the Firefox source dominates this build - longer than compiling
+# SpiderMonkey - and three separate guesses at why have now been wrong. This
+# measures it instead: same archive, same subtree, four combinations of tool and
+# disk, on whichever image you point it at. It builds nothing and publishes
+# nothing; it exists to answer which extractor to use and where to put the
+# build root.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: choice
+        options: [windows-2022, windows-latest]
+        default: windows-2022
+      version:
+        type: string
+        default: 153.3.0esr
+
+jobs:
+  probe:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Environment
+        shell: pwsh
+        run: |
+          "runner image : ${{ inputs.runner }}"
+          "tar          : " + (Get-Command tar).Source
+          & "$env:SystemRoot\System32\tar.exe" --version
+          $7z = "$env:ProgramFiles\7-Zip\7z.exe"
+          "7-Zip        : $7z"
+          if (Test-Path $7z) { (& $7z | Select-Object -First 2) -join ' ' }
+          try {
+            $d = Get-MpComputerStatus
+            "defender     : realtime=$($d.RealTimeProtectionEnabled) antivirus=$($d.AntivirusEnabled)"
+          } catch { "defender     : cannot query - $($_.Exception.Message)" }
+          Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
+            ForEach-Object { "disk {0} {1,8:N0} MB free of {2,8:N0} MB" -f $_.DeviceID, ($_.FreeSpace/1MB), ($_.Size/1MB) }
+
+      - name: Fetch and decompress the source
+        shell: pwsh
+        run: |
+          $v = '${{ inputs.version }}'
+          $url = "https://ftp.mozilla.org/pub/firefox/releases/$v/source/firefox-$v.source.tar.xz"
+          New-Item -ItemType Directory -Force C:\probe | Out-Null
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          Invoke-WebRequest -Uri $url -OutFile C:\probe\src.tar.xz -UseBasicParsing -TimeoutSec 900
+          "download : {0:mm\:ss}" -f $sw.Elapsed
+          $sw.Restart()
+          & "$env:ProgramFiles\7-Zip\7z.exe" e -txz -y -oC:\probe C:\probe\src.tar.xz | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "xz decode failed" }
+          "xz decode: {0:mm\:ss}" -f $sw.Elapsed
+          Get-ChildItem C:\probe\*.tar | ForEach-Object { "tar      : {0} ({1:N0} MB)" -f $_.Name, ($_.Length/1MB) }
+
+      # One subtree, extracted four ways. js/ is what this build actually needs,
+      # and it is large enough to time without unpacking the whole archive four
+      # times over.
+      - name: Time the combinations
+        shell: pwsh
+        run: |
+          $v    = '${{ inputs.version }}' -replace 'esr$',''
+          $tar  = "$env:SystemRoot\System32\tar.exe"
+          $7z   = "$env:ProgramFiles\7-Zip\7z.exe"
+          $src  = (Get-ChildItem C:\probe\*.tar | Select-Object -First 1).FullName
+          $sub  = "firefox-$v/js"
+
+          $drives = @('C')
+          # D: on a hosted runner is the local temp disk; it is not always present
+          # and not always big enough, so only measure it when it can take this.
+          $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'" -ErrorAction SilentlyContinue
+          if ($d -and $d.FreeSpace -gt 8GB) { $drives += 'D' } else { "skipping D: (absent or under 8 GB free)" }
+
+          $results = @()
+          foreach ($drive in $drives) {
+            foreach ($tool in @('bsdtar', '7zip')) {
+              $dest = "${drive}:\probe-$tool"
+              if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+              New-Item -ItemType Directory -Force $dest | Out-Null
+
+              $sw = [Diagnostics.Stopwatch]::StartNew()
+              if ($tool -eq 'bsdtar') {
+                & $tar -xf $src -C $dest $sub 2>&1 | Out-Null
+              } else {
+                & $7z x $src "-o$dest" "$sub/*" -y -bso0 -bsp0 | Out-Null
+              }
+              $sw.Stop()
+
+              $n = (Get-ChildItem $dest -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+              $results += [pscustomobject]@{
+                Drive   = "${drive}:"
+                Tool    = $tool
+                Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+                Files   = $n
+                PerSec  = if ($sw.Elapsed.TotalSeconds -gt 0) { [math]::Round($n / $sw.Elapsed.TotalSeconds) } else { 0 }
+              }
+              Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+            }
+          }
+          "";  "=== $sub on ${{ inputs.runner }} ==="
+          $results | Format-Table -AutoSize | Out-String | Write-Host
+          $best = $results | Sort-Object PerSec -Descending | Select-Object -First 1
+          "fastest: {0} on {1} at {2:N0} files/sec" -f $best.Tool, $best.Drive, $best.PerSec
