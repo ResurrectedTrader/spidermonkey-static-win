@@ -45,6 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PowerShell only discovers that a function does not exist when the line
+      # calling it runs, and in this script that can be an hour in. Cheaper to
+      # ask the parser first.
+      - name: Check the build script
+        shell: pwsh
+        run: .\check-script.ps1 .\build-spidermonkey.ps1
+
       # A typo here would otherwise surface as a confusing 404 partway through
       # the download step, after the toolchain work has already run.
       - name: Check the version exists

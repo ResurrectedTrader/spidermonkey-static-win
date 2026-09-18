@@ -240,7 +240,7 @@ function Expand-Tarball {
     if (-not (Test-Path $tar)) {
         $tar = (Get-Command tar -ErrorAction SilentlyContinue).Source
         if (-not $tar) { Die 'no tar: neither System32 nor PATH has one' }
-        Warn "no bsdtar in System32, falling back to $tar"
+        Warn2 "no bsdtar in System32, falling back to $tar"
     }
     Ok "tar: $tar"
     Invoke-Native { & $tar --version 2>&1 | Select-Object -First 1 | Write-Host } 'tar --version' -AllowFailure
@@ -268,7 +268,7 @@ function Expand-Tarball {
                 if ($fi.Length -gt 0) { $tail = Get-Content $f -Tail 1 -ErrorAction SilentlyContinue }
             }
         }
-        Warn ("{0:hh\:mm\:ss} elapsed, {1,8:N0} KB listed{2}" -f `
+        Warn2 ("{0:hh\:mm\:ss} elapsed, {1,8:N0} KB listed{2}" -f `
               ((Get-Date) - $started), ($bytes / 1KB), $(if ($tail) { ", at $tail" } else { ' (nothing yet)' }))
     }
     # Reading ExitCode off a Start-Process object is only reliable after the
