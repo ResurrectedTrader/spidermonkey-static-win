@@ -123,9 +123,15 @@ jobs:
           if (-not (Test-Path "$dist\toolset.txt"))      { throw "no toolset.txt at $dist" }
           $msvc = (Get-Content "$dist\toolset.txt" -Raw).Trim()
           $name = "spidermonkey-${{ inputs.version }}-$tag-msvc$msvc"
-          Compress-Archive -Path "$dist\*" -DestinationPath "$env:GITHUB_WORKSPACE\$name.zip" -CompressionLevel Optimal
+          # Not Compress-Archive: it buffers the archive in memory and fails past
+          # 2 GB with "Stream was too long", which a Debug build comfortably
+          # exceeds. The .NET call streams straight to the file and writes Zip64
+          # headers when the content needs them.
+          $zip = "$env:GITHUB_WORKSPACE\$name.zip"
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $dist, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
           "name=$name" >> $env:GITHUB_OUTPUT
-          "{0} {1:N0} MB (needs MSVC {2} or newer)" -f "$name.zip", ((Get-Item "$env:GITHUB_WORKSPACE\$name.zip").Length/1MB), $msvc
+          "{0} {1:N0} MB (needs MSVC {2} or newer)" -f "$name.zip", ((Get-Item $zip).Length/1MB), $msvc
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
